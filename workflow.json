@@ -1,0 +1,1222 @@
+{
+  "name": "SEO Site Speed/Performance Review",
+  "nodes": [
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ed173ad7-6ac1-4d27-a448-37597cb7957a",
+              "name": "site",
+              "value": "INSERT_WEBSITE_URL_TO_REVIEW",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1232,
+        800
+      ],
+      "id": "01106859-b055-473b-a641-297c6eb674cc",
+      "name": "Init Site"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1456,
+        800
+      ],
+      "id": "5c8c1781-3e94-4d7d-baf8-41cc5d714a8e",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "url": "={{ ($json.site || '').replace(/\\/+$/,'') + '/sitemap.xml' }}\n",
+        "options": {
+          "allowUnauthorizedCerts": false,
+          "redirect": {
+            "redirect": {}
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -976,
+        800
+      ],
+      "id": "c285803d-273d-48a8-a4d6-1af5829b2d87",
+      "name": "Fetch Sitemap",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Expect raw XML in $json.data or $json.body depending on your HTTP node\nconst xml = $json.data || $json.body || '';\n// Extract all <loc> values (handles namespaces and whitespace)\nconst locs = Array.from(xml.matchAll(/<loc[^>]*>\\s*([^<\\s][^<]*)\\s*<\\/loc>/gi))\n  .map(m => m[1].trim());\n\n// Emit each URL as its own item\nif (locs.length) {\n  return locs.map(u => ({ json: { url: u, source: 'sitemap' }}));\n}\n\n// If nothing found, emit a marker so we can trigger the fallback crawler later\nreturn [{ json: { url: null, source: 'sitemap', empty: true }}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -464,
+        784
+      ],
+      "id": "e02e9c5f-0200-4191-a370-8618af9cdb28",
+      "name": "Parse Sitemap"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handles both cases:\n// 1) Grouped sitemap input -> output { sitemap_url, site }\n// 2) Fallback (already-expanded links) -> output { url } (drops \"source\")\n\nconst all = $input.all();\n\n// Case 1: grouped sitemap parent(s) provided as json.urls\nconst grouped = all.flatMap(i => Array.isArray(i.json.urls) ? i.json.urls : []);\nif (grouped.length) {\n  // Prefer post/page sitemaps if present\n  const prefer = grouped.filter(u =>\n    /wp-sitemap-(posts|pages)/i.test(u) || /(post|page)-sitemap.*\\.xml$/i.test(u)\n  );\n  const picked = (prefer.length ? prefer : grouped).slice(0, 10); // cap for speed\n  const site = (all.find(i => i.json.site)?.json.site || \"\").replace(/\\/$/, \"\");\n  return picked.map(s => ({ json: { sitemap_url: s, site } }));\n}\n\n// Case 2: fallback/path already has page URLs -> pass through as { url }\nconst urls = all.map(i => i.json.url).filter(Boolean);\nconst deduped = Array.from(new Set(urls));\nreturn deduped.map(u => ({ json: { url: u } }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        784
+      ],
+      "id": "78680877-8a61-4440-9aae-d421f05e30fb",
+      "name": "Expand URLs (If Grouped)"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ JSON.stringify($json) }}",
+        "options": {
+          "systemMessage": "You are an expert Technical SEO performance auditor (2025 best practices). The user message is ONE JSON object containing PSI results for a single URL (fields like source_url, psi.mobile, psi.desktop, psi.overall, etc.).\n\nGoal: Evaluate site speed/performance for THIS URL and return ONE minified JSON object with a 0–100 score, findings, prioritized recommendations (P0/P1/P2), and references. Always include \"page_url\" set to the provided source_url (or \"\" if missing).\n\nNon-negotiables:\n\nNever say “no findings” or “no recommendations.” If data is sparse, use the heuristics below and produce pragmatic, standard fixes.\n\nReturn ≥3 findings and ≥3 recommendations. If score < 60, include at least one P0.\n\nPrefer mobile signals when both are available; include desktop where helpful.\n\nNo code fences, no prose outside JSON.\n\nFields you may use (if present):\n\npsi.mobile|desktop.lab_metrics: lcp_ms, fcp_ms, tti_ms, tbt_ms, ttfb_ms, cls, inp_ms\n\npsi.mobile|desktop.resources: total_transfer_bytes, total_image_bytes, total_js_bytes, total_css_bytes, request_count, largest_image_bytes\n\npsi.mobile|desktop.opportunities_top[]: {id, title, displayValue, savings_ms, savings_bytes}\n\npsi.overall.cwv_status[platform]: {lcp_pass, inp_pass, cls_pass}\n\npsi.overall.prioritized_recommendations[]\n\nHeuristics & thresholds (use when present; otherwise infer conservatively):\n\nLCP (mobile): target ≤ 2500 ms; 2501–4000 = needs-improvement; >4000 = fail → P0 “Fix LCP”.\n\nTTFB: target ≤ 200 ms (mobile: ≤ 300 ms) → if high, add server/caching/CDN guidance.\n\nTotal transfer size: ideal ≤ 1.5 MB; warn at > 2.5 MB → P1 “Reduce page weight”.\n\nImages: convert to WebP/AVIF; ensure srcset/sizes; lazy-load below-fold; compress large hero to ≤150–200 KB.\n\nJS: flag unused-javascript and bundle size; P1 “Tree-shake/code-split/defer”.\n\nRender-blocking: if render-blocking-resources present or TTI is slow → P1 “Inline critical CSS; defer non-critical JS; font-display:swap”.\n\nCLS: target ≤ 0.1 (lab) → add width/height or CSS aspect ratio, font loading strategies.\n\nTBT/INP: high = main-thread work; reduce long tasks, hydrate less, defer listeners.\n\nUse opportunities_top text/savings to directly inform “why” and “how”.\n\nScoring (start at 100; clamp 0–100) — subtract:\n\nLCP fail (>4000 ms): −30; needs-improvement (2501–4000): −15\n\nExcess weight (>2.5 MB): −10; very heavy (>4 MB): −20\n\nRender-blocking present: −8\n\nUnused JS (≥100 KB): −6\n\nCLS > 0.1: −6; > 0.25: −12\n\nSlow TTFB (>300 ms mobile): −6\n\nTBT > 200 ms: −6\nIf multiple severe issues, total deductions may stack.\n\nOutput (STRICT single-line JSON only):\n{\n\"page_url\":\"<url-or-empty>\",\n\"score\":<int>,\n\"findings\":[\"...\",\"...\",\"...\"],\n\"recommendations\":[\n{\"priority\":\"P0|P1|P2\",\"title\":\"...\",\"why\":\"...\",\"how\":\"...\"},\n{\"priority\":\"P0|P1|P2\",\"title\":\"...\",\"why\":\"...\",\"how\":\"...\"}\n],\n\"references\":[\"web.dev/lcp\",\"web.dev/cls\",\"developer.chrome.com/lighthouse/performance\"]\n}\n\nGuidance for sparse data:\n\nIf some metrics are missing but opportunities_top exists, derive findings/recs from those items.\n\nIf almost nothing is present and score is low, produce standard P0/P1 fixes based on typical bottlenecks (LCP, images, render-blocking, unused JS), without claiming the site is inaccessible or that “no data” was provided.\n\nStyle:\n\nFindings: short, specific (“Mobile LCP 5400ms — failing threshold 2500ms”).\n\n“How”: 1–3 concrete actions (e.g., “Inline critical CSS; add <link rel='preload'> for hero image; convert hero to AVIF ≤180KB; use fetchpriority='high' on LCP element”).\n\nBe accurate and practical. No invented sitewide claims.\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        3200,
+        880
+      ],
+      "id": "511804ec-9248-47fc-92ad-4862b1d15cd4",
+      "name": "Site Speed/Performance Review Agent",
+      "alwaysOutputData": false,
+      "executeOnce": false,
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        688,
+        784
+      ],
+      "id": "b3f9b8cf-2452-49ee-b384-2cf951da59ce",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "url": "=https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "url",
+              "value": "={{$json.url}}"
+            },
+            {
+              "name": "strategy",
+              "value": "mobile"
+            },
+            {
+              "name": "category",
+              "value": "performance"
+            },
+            {
+              "name": "fields",
+              "value": "lighthouseResult(audits,finalUrl,requestedUrl,stackPacks,runWarnings),analysisUTCTimestamp"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1648,
+        560
+      ],
+      "id": "1bc8f468-cc8f-499f-9ef1-48043a5d3269",
+      "name": "PSI Mobile",
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "4c2Li9XpiBkBItSg",
+          "name": "Query Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2672,
+        1200
+      ],
+      "id": "3005479b-f2ef-474d-8c49-1b18a483afe1",
+      "name": "Wait2",
+      "webhookId": "60c88f7f-2393-4a5b-bf6d-0b334e2b9568"
+    },
+    {
+      "parameters": {
+        "url": "=https://www.googleapis.com/pagespeedonline/v5/runPagespeed\n?url={{ encodeURIComponent($json.psi_final_url || $json.final_url || $json.url) }}\n&strategy=desktop\n&category=performance\n&locale=en_US\n&cb={{ $json.run || 0 }}\n&ts={{ Date.now() }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1648,
+        752
+      ],
+      "id": "7f5a080c-66f3-4810-a74e-760678ecb0f0",
+      "name": "PSI Desktop",
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "4c2Li9XpiBkBItSg",
+          "name": "Query Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b18a4f78-dfe6-45f9-a54e-57dafe337946",
+              "name": "psi_mobile",
+              "value": "={{$json.body || $json}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2064,
+        560
+      ],
+      "id": "4d8ce364-eb68-42b7-8ccd-42b271ff2db6",
+      "name": "Wrap Mobile"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ad4bd7d5-c1db-48f8-9915-786d37aa9b5d",
+              "name": "psi_desktop",
+              "value": "={{$json.body || $json}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2064,
+        752
+      ],
+      "id": "63fae0a2-3c46-4c78-bc83-9afc74dc175d",
+      "name": "Wrap Desktop"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "numberInputs": 4,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2432,
+        848
+      ],
+      "id": "b145e7e2-6ac7-4f52-8c79-5547435d76f1",
+      "name": "Merge PSI (by position)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract Perf + CWV (mobile+desktop) — robust PSI locator (ES2018-safe)\n// Accepts psi_mobile / psi_desktop in any shape (string, {body:{...}}, {data:{...}}, nested).\n// Extracts lab metrics (incl. INP variants), category scores, resources (with request_count fallbacks),\n// third-party summary (with network fallback), opportunities (with savings fallback),\n// diagnostics, rich LCP element info, prioritized recommendations, and a consolidated rollup.\n\n// ---------------- Utilities ----------------\nfunction score100(x) { if (x === null || x === undefined) return null; return Math.round(Number(x) * 100); }\nfunction ms(n) { return n == null ? null : Math.round(Number(n)); }\nfunction bytes(n){ return n == null ? null : Math.round(Number(n)); }\n\n// Robust getter: dotted + [idx] paths.\nfunction safeGet(obj, path, dflt) {\n  if (!obj || !path) return (dflt === undefined ? null : dflt);\n  var parts = path.split('.');\n  var cur = obj;\n  for (var i = 0; i < parts.length; i++) {\n    var part = parts[i];\n\n    // Walk bracket indices within this segment (e.g., \"items[0][1]\")\n    var prop = part;\n    while (prop.indexOf('[') !== -1) {\n      var before = prop.substring(0, prop.indexOf('['));\n      var after = prop.substring(prop.indexOf('['));\n      if (before) {\n        if (!cur || !Object.prototype.hasOwnProperty.call(cur, before)) return (dflt === undefined ? null : dflt);\n        cur = cur[before];\n      }\n      var m = after.match(/^\\[(\\d+)\\](.*)$/);\n      if (!m) return (dflt === undefined ? null : dflt);\n      var idx = parseInt(m[1], 10);\n      if (!cur || !Array.isArray(cur) || cur.length <= idx) return (dflt === undefined ? null : dflt);\n      cur = cur[idx];\n      prop = m[2];\n      if (!prop) break;\n    }\n\n    if (prop) {\n      if (!cur || !Object.prototype.hasOwnProperty.call(cur, prop)) return (dflt === undefined ? null : dflt);\n      cur = cur[prop];\n    }\n  }\n  return (cur === undefined ? (dflt === undefined ? null : dflt) : cur);\n}\n\n// Try to parse strings into JSON\nfunction parseMaybeJson(x) {\n  if (typeof x === 'string') {\n    try { return JSON.parse(x); } catch (e) { return x; }\n  }\n  return x;\n}\n\n// Recursively search for an object that has a \"lighthouseResult\" key (the PSI root)\nfunction findPsiRoot(any) {\n  any = parseMaybeJson(any);\n  if (!any || typeof any !== 'object') return null;\n  if (Object.prototype.hasOwnProperty.call(any, 'lighthouseResult')) return any;\n\n  // Common wrappers first\n  var likely = ['body','data','result','results','response'];\n  for (var i = 0; i < likely.length; i++) {\n    var k = likely[i];\n    if (any[k] && typeof any[k] === 'object') {\n      var candidate = findPsiRoot(any[k]);\n      if (candidate) return candidate;\n    }\n  }\n\n  // Fallback: shallow recurse all object props (guard against big arrays)\n  var keys = Object.keys(any);\n  for (var j = 0; j < keys.length; j++) {\n    var v = any[keys[j]];\n    if (v && typeof v === 'object') {\n      if (Array.isArray(v)) {\n        for (var a = 0; a < Math.min(v.length, 10); a++) {\n          var arrFound = findPsiRoot(v[a]);\n          if (arrFound) return arrFound;\n        }\n      } else {\n        var found = findPsiRoot(v);\n        if (found) return found;\n      }\n    }\n  }\n  return null;\n}\n\n// ---------------- Extractors ----------------\nfunction extractResourceSummary(psi) {\n  var rs  = safeGet(psi, 'lighthouseResult.audits.resource-summary.details.items', []) || [];\n  var di  = safeGet(psi, 'lighthouseResult.audits.diagnostics.details.items[0]', {}) || {};\n  var net = safeGet(psi, 'lighthouseResult.audits.network-requests.details.items', []) || [];\n\n  var totalBytes = bytes(safeGet(psi, 'lighthouseResult.audits.total-byte-weight.numericValue', null));\n  if (totalBytes == null && di.totalByteWeight != null) totalBytes = bytes(di.totalByteWeight);\n\n  // Try 1: sum per-type requestCount\n  var reqSum = 0;\n  for (var i = 0; i < rs.length; i++) {\n    var c = rs[i].requestCount;\n    if (typeof c === 'number') reqSum += c;\n  }\n  // Try 2: diagnostics fallback\n  if (!reqSum && typeof di.numRequests === 'number') reqSum = di.numRequests;\n  // Try 3: network-requests fallback\n  if (!reqSum && Array.isArray(net) && net.length) reqSum = net.length;\n\n  var out = {\n    request_count: reqSum || null,\n    total_transfer_bytes: totalBytes,\n    total_image_bytes: null, total_js_bytes: null, total_css_bytes: null,\n    total_font_bytes: null, total_doc_bytes: null, total_media_bytes: null,\n    total_other_bytes: null, image_count: null, js_count: null, css_count: null,\n    font_count: null, video_count: null, largest_image_bytes: 0\n  };\n\n  var largestImage = 0;\n  for (var j = 0; j < net.length; j++) {\n    var r = net[j];\n    var rt = (r.resourceType || '').toLowerCase();\n    if (rt === 'image') largestImage = Math.max(largestImage, Number(r.transferSize || 0));\n  }\n  out.largest_image_bytes = bytes(largestImage) || 0;\n\n  for (var k = 0; k < rs.length; k++) {\n    var item = rs[k];\n    var t = (item.resourceType || '').toLowerCase();\n    var bytesVal = bytes(item.transferSize);\n    var countVal = (item.requestCount !== undefined ? item.requestCount : null);\n    if (t === 'image') { out.total_image_bytes = bytesVal; out.image_count = countVal; }\n    else if (t === 'script') { out.total_js_bytes = bytesVal; out.js_count = countVal; }\n    else if (t === 'stylesheet') { out.total_css_bytes = bytesVal; out.css_count = countVal; }\n    else if (t === 'font') { out.total_font_bytes = bytesVal; out.font_count = countVal; }\n    else if (t === 'document') { out.total_doc_bytes = bytesVal; }\n    else if (t === 'media') { out.total_media_bytes = bytesVal; out.video_count = countVal; }\n    else if (t === 'other') { out.total_other_bytes = bytesVal; }\n  }\n  return out;\n}\n\nfunction extract3P(psi) {\n  var items = safeGet(psi, 'lighthouseResult.audits.third-party-summary.details.items', []) || [];\n  var hosts = [];\n  var count = 0;\n  for (var i = 0; i < items.length; i++) {\n    var it = items[i];\n    if (it.entity && it.entity.text) hosts.push(it.entity.text);\n    else if (it.entity) hosts.push(String(it.entity));\n    if (typeof it.requestCount === 'number') count += it.requestCount;\n  }\n\n  // Fallback: compute from network-requests by comparing hostnames\n  if (!count) {\n    var finalUrl = safeGet(psi, 'lighthouseResult.finalDisplayedUrl', '') || safeGet(psi, 'id', '');\n    var originHost = '';\n    try { originHost = finalUrl ? (new URL(finalUrl)).host : ''; } catch(e) {}\n    var net = safeGet(psi, 'lighthouseResult.audits.network-requests.details.items', []) || [];\n    var thirdSet = {};\n    for (var j = 0; j < net.length; j++) {\n      var url = net[j].url || '';\n      var h = '';\n      try { h = url ? (new URL(url)).host : ''; } catch(e) {}\n      if (h && originHost && h !== originHost) {\n        thirdSet[h] = true;\n        count += 1;\n      }\n    }\n    hosts = Object.keys(thirdSet);\n  }\n  return { third_party_request_count: count, third_party_hosts: hosts };\n}\n\nfunction extractOpportunities(psi, limit) {\n  if (limit == null) limit = 8;\n  var audits = safeGet(psi, 'lighthouseResult.audits', {}) || {};\n  var refs = safeGet(psi, 'lighthouseResult.categories.performance.auditRefs', []) || [];\n  var out = [];\n\n  // Primary: use auditRefs where group === 'load-opportunities'\n  for (var i = 0; i < refs.length; i++) {\n    var ref = refs[i];\n    if (ref.group !== 'load-opportunities') continue;\n    var a = audits[ref.id];\n    if (!a) continue;\n    var msSave = safeGet(a, 'details.overallSavingsMs', null);\n    var byteSave = safeGet(a, 'details.overallSavingsBytes', null);\n    out.push({\n      id: ref.id, title: a.title, description: a.description,\n      score: a.score, displayValue: a.displayValue || null,\n      savings_ms: ms(msSave), savings_bytes: bytes(byteSave)\n    });\n  }\n\n  // Fallback: scan all audits for overallSavingsMs > 0\n  if (!out.length) {\n    var keys = Object.keys(audits);\n    for (var j = 0; j < keys.length; j++) {\n      var au = audits[keys[j]];\n      var sMs = safeGet(au, 'details.overallSavingsMs', null);\n      var sB  = safeGet(au, 'details.overallSavingsBytes', null);\n      if ((sMs && sMs > 0) || (sB && sB > 0)) {\n        out.push({\n          id: keys[j], title: au.title, description: au.description,\n          score: au.score, displayValue: au.displayValue || null,\n          savings_ms: ms(sMs), savings_bytes: bytes(sB)\n        });\n      }\n    }\n  }\n\n  out.sort(function(a,b){ return (b.savings_ms||0) - (a.savings_ms||0); });\n  return out.slice(0, limit);\n}\n\nfunction extractDiagnostics(psi) {\n  var diag = safeGet(psi, 'lighthouseResult.audits.diagnostics.details.items[0]', {}) || {};\n  return {\n    num_requests: (diag.numRequests !== undefined ? diag.numRequests : null),\n    main_doc_transfer_bytes: bytes(diag.mainDocumentTransferSize),\n    max_potential_fid_ms: ms(safeGet(psi,'lighthouseResult.audits.max-potential-fid.numericValue', null)),\n    raw: diag\n  };\n}\n\nfunction extractLabCore(psi) {\n  var a = function(id){ return safeGet(psi, 'lighthouseResult.audits.' + id + '.numericValue', null); };\n  var ttfb = a('server-response-time'); if (ttfb == null) ttfb = a('time-to-first-byte');\n\n  // Try all known INP ids in order of likelihood\n  var inp = a('interaction-to-next-paint');\n  if (inp == null) inp = a('interactive-next-paint');\n  if (inp == null) inp = a('experimental-interaction-to-next-paint');\n\n  return {\n    perf_score: score100(safeGet(psi, 'lighthouseResult.categories.performance.score', null)),\n    ttfb_ms: ms(ttfb),\n    fcp_ms: ms(a('first-contentful-paint')),\n    lcp_ms: ms(a('largest-contentful-paint')),\n    cls: Number(safeGet(psi, 'lighthouseResult.audits.cumulative-layout-shift.numericValue', null)) || 0,\n    inp_ms: ms(inp),\n    tti_ms: ms(a('interactive')),\n    tbt_ms: ms(a('total-blocking-time'))\n  };\n}\n\nfunction extractCategoryScores(psi) {\n  var cats = safeGet(psi, 'lighthouseResult.categories', {}) || {};\n  return {\n    performance: score100(cats.performance && cats.performance.score),\n    accessibility: score100(cats.accessibility && cats.accessibility.score),\n    best_practices: score100(cats['best-practices'] && cats['best-practices'].score),\n    seo: score100(cats.seo && cats.seo.score),\n    pwa: score100(cats.pwa && cats.pwa.score)\n  };\n}\n\nfunction extractCWVField(psi) {\n  var page = safeGet(psi, 'loadingExperience.metrics', null);\n  var origin = safeGet(psi, 'originLoadingExperience.metrics', null);\n  var src = (page && Object.keys(page).length) ? page : origin;\n\n  function m(key) {\n    var mm = src && src[key];\n    if (!mm) return null;\n    return { percentile: ms(mm.percentile), category: mm.category || null };\n  }\n\n  return {\n    source: (page && Object.keys(page).length) ? 'page' : (origin ? 'origin' : null),\n    lcp: m('LARGEST_CONTENTFUL_PAINT_MS'),\n    cls: m('CUMULATIVE_LAYOUT_SHIFT_SCORE'),\n    inp: m('INTERACTION_TO_NEXT_PAINT')\n  };\n}\n\n// Rich LCP element info (node/tag/selector/url) for targeted guidance\nfunction extractLcpElement(psi) {\n  // Try v1 shape\n  var it = safeGet(psi, 'lighthouseResult.audits.largest-contentful-paint-element.details.items[0]', null);\n  // Try older/newer shapes\n  if (!it) it = safeGet(psi, 'lighthouseResult.audits.lcp-element.details.items[0]', null);\n\n  if (!it) return null;\n\n  var node = it.node || {};\n  var selector = node.selector || node.path || null;\n  var label = node.nodeLabel || node.snippet || it.type || null;\n  var url = it.url || node.url || null;\n  var tag = node.nodeName || node.tagName || null;\n\n  return {\n    selector: selector,\n    tag: tag,\n    label: label,\n    url: url\n  };\n}\n\n// ---------------- Thresholds & Evaluation ----------------\nfunction thresholds() {\n  return {\n    lcp_good_ms: 2500,\n    inp_good_ms: 200,\n    cls_good: 0.1,\n    ttfb_good_ms: 800,\n    total_bytes_soft_cap: 2000000,\n    largest_image_soft_cap: 200000\n  };\n}\n\nfunction evalFindings(lab, res, field, strategyLabel, lcpElem) {\n  var t = thresholds();\n  var f = [];\n  var recs = [];\n  function pushRec(priority, title, why, how) {\n    recs.push({ priority: priority, title: title, why: why, how: how, strategy: strategyLabel });\n  }\n\n  // LCP\n  if (lab.lcp_ms != null && lab.lcp_ms > t.lcp_good_ms) {\n    f.push('High LCP (lab): ' + lab.lcp_ms + 'ms');\n\n    var isImageLCP = lcpElem && ((lcpElem.tag && lcpElem.tag.toLowerCase() === 'img') || (lcpElem.url && /\\.(avif|webp|png|jpe?g)$/i.test(lcpElem.url)));\n    var target = 'target ≤ ' + t.lcp_good_ms + 'ms.';\n    if (isImageLCP) {\n      pushRec('P0','Reduce Largest Contentful Paint (image LCP)',\n        'LCP is ' + lab.lcp_ms + 'ms (' + target + ')',\n        'Convert hero to AVIF/WebP; serve responsive sizes/srcset; add fetchpriority=\"high\" and rel=preload for the hero; inline critical CSS; defer non-critical JS; ensure server-rendered above-the-fold.');\n    } else {\n      pushRec('P0','Reduce Largest Contentful Paint',\n        'LCP is ' + lab.lcp_ms + 'ms (' + target + ')',\n        'Minimize render-blocking (inline critical CSS, preload key fonts with `font-display:swap`); reduce main-thread work; preconnect critical origins; ensure primary above-the-fold DOM is server-rendered or streamed.');\n    }\n  }\n\n  // INP\n  if (lab.inp_ms != null && lab.inp_ms > t.inp_good_ms) {\n    f.push('High INP (lab): ' + lab.inp_ms + 'ms');\n    pushRec('P0','Improve Interaction to Next Paint',\n      'INP is ' + lab.inp_ms + 'ms (target ≤ ' + t.inp_good_ms + 'ms).',\n      'Break up long tasks (>50ms), code-split, minimize synchronous work in input handlers, and reduce hydration work.');\n  }\n\n  // CLS\n  if (lab.cls != null && lab.cls > t.cls_good) {\n    f.push('High CLS (lab): ' + lab.cls);\n    pushRec('P1','Reduce Cumulative Layout Shift',\n      'CLS is ' + lab.cls + ' (target < ' + t.cls_good + ').',\n      'Set width/height or aspect-ratio on media; reserve space for embeds/ads; avoid late-injected content; use `font-display:swap` and prevent FOIT/FOUT.');\n  }\n\n  // TTFB\n  if (lab.ttfb_ms != null && lab.ttfb_ms > t.ttfb_good_ms) {\n    f.push('Slow TTFB (lab): ' + lab.ttfb_ms + 'ms');\n    pushRec('P1','Lower Time to First Byte',\n      'TTFB is ' + lab.ttfb_ms + 'ms (target ≤ ' + t.ttfb_good_ms + 'ms).',\n      'Add CDN caching; enable compression; optimize server routes/DB; adopt HTTP/2 or HTTP/3; consider edge/static rendering for the home page.');\n  }\n\n  // Field CWV (if present)\n  if (field && field.lcp && field.lcp.percentile > t.lcp_good_ms) {\n    pushRec('P0','Field LCP failing (CWV)',\n      'Field LCP p75 is ' + field.lcp.percentile + 'ms.',\n      'Prioritize above-the-fold for real users; optimize hero; reduce render-blocking and main-thread work on mobile connections.');\n  }\n  if (field && field.inp && field.inp.percentile > t.inp_good_ms) {\n    pushRec('P0','Field INP failing (CWV)',\n      'Field INP p75 is ' + field.inp.percentile + 'ms.',\n      'Reduce JS, eliminate long tasks, and optimize input handler work.');\n  }\n  if (field && field.cls && field.cls.category === 'SLOW') {\n    pushRec('P1','Field CLS poor (CWV)',\n      'Field CLS category is SLOW.',\n      'Reserve layout space for dynamic content; avoid layout jank from late fonts and ads; audit shifts in DevTools.');\n  }\n\n  // Weight & requests\n  if (res && res.total_transfer_bytes && res.total_transfer_bytes > t.total_bytes_soft_cap) {\n    pushRec('P1','Total bytes too large',\n      'Transfer size ≈ ' + (res.total_transfer_bytes.toLocaleString ? res.total_transfer_bytes.toLocaleString() : res.total_transfer_bytes) + ' bytes.',\n      'Compress/resize images; ship less JS (tree-shake, code-split); purge CSS; remove unused assets.');\n  }\n  if (res && res.largest_image_bytes && res.largest_image_bytes > t.largest_image_soft_cap) {\n    pushRec('P1','Largest image heavy',\n      'Largest image ≈ ' + (res.largest_image_bytes.toLocaleString ? res.largest_image_bytes.toLocaleString() : res.largest_image_bytes) + ' bytes.',\n      'Serve AVIF/WebP; provide srcset/sizes; lazy-load below-the-fold.');\n  }\n\n  return { findings: f, recommendations: recs };\n}\n\n// ---------------- Bundle Builder ----------------\nfunction buildStrategyBundle(psiRaw, label) {\n  if (!psiRaw) return null;\n  var root = findPsiRoot(psiRaw);\n  if (!root) return null;\n\n  var lab = extractLabCore(root);\n  var res = extractResourceSummary(root);\n  var cwv = extractCWVField(root);\n  var cats = extractCategoryScores(root);\n  var thp = extract3P(root);\n  var opps = extractOpportunities(root);\n  var diag = extractDiagnostics(root);\n  var lcpElem = extractLcpElement(root);\n\n  var url = safeGet(root, 'lighthouseResult.finalDisplayedUrl', null) ||\n            safeGet(root, 'id', null) ||\n            safeGet(root, 'lighthouseResult.requestedUrl', null);\n\n  var evald = evalFindings(lab, res, cwv, label, lcpElem);\n\n  return {\n    strategy: label,\n    psi_final_url: url,\n    lab_metrics: lab,\n    field_cwv: cwv,\n    category_scores: cats,\n    resources: res,\n    third_party: thp,\n    opportunities_top: opps,\n    diagnostics: diag,\n    lcp_element: lcpElem,\n    eval_findings: evald.findings,\n    recommendations: evald.recommendations\n  };\n}\n\n// Deduplicate + sort recommendations by priority\nfunction dedupeAndSortRecs(recs) {\n  var map = Object.create(null);\n  for (var i = 0; i < recs.length; i++) {\n    var r = recs[i];\n    var key = (r.priority || '') + '|' + (r.title || '') + '|' + (r.strategy || '');\n    map[key] = r;\n  }\n  var arr = [];\n  for (var k in map) arr.push(map[k]);\n  var rank = { P0: 0, P1: 1, P2: 2 };\n  arr.sort(function(a,b){ return (rank[a.priority] || 9) - (rank[b.priority] || 9); });\n  return arr;\n}\n\n// ---------------- Main ----------------\nvar out = [];\nfor (var i = 0; i < items.length; i++) {\n  var item = items[i];\n  var pm = item.json && item.json.psi_mobile;\n  var pd = item.json && item.json.psi_desktop;\n\n  var mobile = buildStrategyBundle(pm, 'mobile');\n  var desktop = buildStrategyBundle(pd, 'desktop');\n\n  var allRecs = dedupeAndSortRecs(\n    (mobile && mobile.recommendations ? mobile.recommendations : []).concat(\n      (desktop && desktop.recommendations ? desktop.recommendations : [])\n    )\n  );\n\n  var rollup = {\n    url: (mobile && mobile.psi_final_url) || (desktop && desktop.psi_final_url) || null,\n    mobile: mobile || { strategy: 'mobile' },\n    desktop: desktop || { strategy: 'desktop' },\n    overall: {\n      cwv_source: (mobile && mobile.field_cwv && mobile.field_cwv.source) ||\n                  (desktop && desktop.field_cwv && desktop.field_cwv.source) || null,\n      cwv_status: {\n        mobile: {\n          lcp_pass: (mobile && mobile.field_cwv && mobile.field_cwv.lcp && mobile.field_cwv.lcp.percentile || Infinity) <= 2500,\n          inp_pass: (mobile && mobile.field_cwv && mobile.field_cwv.inp && mobile.field_cwv.inp.percentile || Infinity) <= 200,\n          cls_pass: !((mobile && mobile.field_cwv && mobile.field_cwv.cls && mobile.field_cwv.cls.category) === 'SLOW')\n        },\n        desktop: {\n          lcp_pass: (desktop && desktop.field_cwv && desktop.field_cwv.lcp && desktop.field_cwv.lcp.percentile || Infinity) <= 2500,\n          inp_pass: (desktop && desktop.field_cwv && desktop.field_cwv.inp && desktop.field_cwv.inp.percentile || Infinity) <= 200,\n          cls_pass: !((desktop && desktop.field_cwv && desktop.field_cwv.cls && desktop.field_cwv.cls.category) === 'SLOW')\n        }\n      },\n      category_scores: {\n        mobile: (mobile ? mobile.category_scores : null),\n        desktop: (desktop ? desktop.category_scores : null)\n      }\n    },\n    prioritized_recommendations: allRecs\n  };\n\n  out.push({ json: rollup });\n}\n\nreturn out;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2656,
+        880
+      ],
+      "id": "5196c6f7-76c3-4493-b867-a61439388821",
+      "name": "Extract Perf + CWV (mobile+desktop)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://chromeuxreport.googleapis.com/v1/records:queryRecord",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"origin\": \"{{ ($json.psi_final_url || $json.final_url || $json.url).match(/^https?:\\/\\/[^\\/]+/)[0] }}\",\n  \"formFactor\": \"PHONE\",\n  \"metrics\": [\n    \"largest_contentful_paint\",\n    \"cumulative_layout_shift\",\n    \"interaction_to_next_paint\"\n  ]\n}\n\n",
+        "options": {
+          "allowUnauthorizedCerts": false,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1024,
+        944
+      ],
+      "id": "b16a90c5-fdec-4697-8e2d-a7399b2d63ca",
+      "name": "CrUX Mobile",
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "4c2Li9XpiBkBItSg",
+          "name": "Query Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://chromeuxreport.googleapis.com/v1/records:queryRecord",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"origin\": \"{{ ($json.psi_final_url || $json.final_url || $json.url).match(/^https?:\\/\\/[^\\/]+/)[0] }}\",\n  \"formFactor\": \"DESKTOP\",\n  \"metrics\": [\n    \"largest_contentful_paint\",\n    \"cumulative_layout_shift\",\n    \"interaction_to_next_paint\"\n  ]\n}\n",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1024,
+        1136
+      ],
+      "id": "85b4caae-6a97-4a52-9046-5b8f5e41806a",
+      "name": "CrUX Desktop",
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "4c2Li9XpiBkBItSg",
+          "name": "Query Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "fb5e3e92-a1f6-43f0-96a8-b4127fde697f",
+              "name": "crux_mobile",
+              "value": "={{ JSON.stringify($json) }}\n",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2064,
+        928
+      ],
+      "id": "5463334a-3793-423e-9644-080050964744",
+      "name": "CrUX Mobile Set"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a67ecbd5-b2ea-4938-a8ad-70c76eb91321",
+              "name": "crux_desktop",
+              "value": "={{ JSON.stringify($json) }}\n",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2064,
+        1120
+      ],
+      "id": "d482cfbe-71e5-4733-b523-19391cff71df",
+      "name": "CrUX Desktop Set",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "6a19ac35-cdb5-4646-83be-b542cbb22fe2",
+              "leftValue": "",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1232,
+        944
+      ],
+      "id": "f53fa17e-64cd-457d-a205-642b3e5d36df",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1efc1a0-f54b-47e1-ba94-870ee69cc274",
+              "leftValue": "",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1232,
+        1136
+      ],
+      "id": "614846e1-9497-42e6-875d-8dbd281ca9a1",
+      "name": "If1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://www.googleapis.com/pagespeedonline/v5/runPagespeed\n?url={{$json.url}}\n&strategy=desktop\n&category=PERFORMANCE\n&cb={{$json.run}}&ts={{Date.now()}}\n",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1648,
+        1216
+      ],
+      "id": "ae1c5923-36ef-44c5-8fb9-c3ea40c97739",
+      "name": "CrUX Desktop Origin",
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "4c2Li9XpiBkBItSg",
+          "name": "Query Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "=https://www.googleapis.com/pagespeedonline/v5/runPagespeed\n?url={{$json.url}}\n&strategy=mobile\n&category=PERFORMANCE\n&cb={{$json.run}}&ts={{Date.now()}}\n",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1648,
+        1024
+      ],
+      "id": "6159af7d-3287-4e21-834a-71d8209bab6c",
+      "name": "CrUX Mobile Origin",
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "4c2Li9XpiBkBItSg",
+          "name": "Query Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {
+          "allowUnauthorizedCerts": false,
+          "redirect": {
+            "redirect": {}
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        16,
+        624
+      ],
+      "id": "0111d640-3845-4605-9d1f-a870b8b80455",
+      "name": "Fetch Child Sitemap",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Input: item.json.data = XML text of the *child* sitemap\nconst xml = $json.data || '';\n\n// grab <loc> URLs\nconst locs = [...xml.matchAll(/<loc>\\s*([^<\\s]+)\\s*<\\/loc>/gi)]\n  .map(m => m[1].trim());\n\n// keep real pages, drop other sitemaps and files\nconst pages = locs\n  .filter(u => !/\\.xml(\\.gz)?$/i.test(u))\n  .filter(u => !/\\.(pdf|jpe?g|png|gif|svg|webp|zip|mp4|mov|avi|docx?|xlsx?|pptx?)$/i.test(u));\n\nconst unique = [...new Set(pages)].slice(0, 200); // cap for speed\n\nreturn unique.map(url => ({ json: { url, source: 'sitemap' } }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        624
+      ],
+      "id": "e865c3a7-3862-498f-ae86-8857d5ba378d",
+      "name": "Parse Child Sitemap"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "91f799b5-4300-45a9-972e-ca460dd2f7ff",
+              "leftValue": "={{ $json.data || '' }}\n\n",
+              "rightValue": "<sitemapindex",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            },
+            {
+              "id": "592fff91-101e-4e69-92d1-22b0ed088a46",
+              "leftValue": "={{ $json.data || '' }}",
+              "rightValue": "<urlset",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -784,
+        800
+      ],
+      "id": "017cfe45-b1d0-412b-94b2-76bed082819d",
+      "name": "Sitemap fetched?"
+    },
+    {
+      "parameters": {
+        "url": "={{ ($node[\"Init Site\"].json.site || \"\").replace(/\\/+$/,\"\") + \"/\" }}\n\n\n",
+        "options": {
+          "redirect": {
+            "redirect": {}
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -512,
+        960
+      ],
+      "id": "3e3fd221-be40-44b6-8d7a-da326b775a71",
+      "name": "Fetch Home - fallback",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// INPUT: item.json.data = full HTML string\n// Requires \"Init Site\" with .json.site (e.g., https://ttes.tvusd.k12.ca.us/)\n\nconst html = $json.data ?? \"\";\n\n// 1) Get site/origin from Init Site; fall back to canonical/og:url\nlet base = ($items(\"Init Site\", 0, 0)?.json?.site ?? \"\").toString().trim().replace(/\\/+$/,\"\");\nlet origin = (base.match(/^https?:\\/\\/[^/]+/i) || [])[0] || \"\";\n\nif (!origin) {\n  const canon =\n    html.match(/<link[^>]+rel=[\"']canonical[\"'][^>]*href=[\"']([^\"']+)[\"']/i)?.[1] ||\n    html.match(/<meta[^>]+property=[\"']og:url[\"'][^>]*content=[\"']([^\"']+)[\"']/i)?.[1];\n  if (canon) origin = (canon.match(/^https?:\\/\\/[^/]+/i) || [])[0] || \"\";\n}\n\nif (!origin) {\n  const findings = ($json.findings ?? []).concat([{\n    id: \"fallback-base-missing\",\n    priority: \"P1\",\n    title: \"Could not infer site origin for fallback discovery\",\n    why: \"No site value from Init Site and no canonical/og:url found.\",\n    how: \"Ensure Init Site sets a full URL like https://example.com\",\n  }]);\n  return [{ json: { findings, urls: [], source: \"fallback\" } }];\n}\n\nconst protocol = (origin.match(/^https?:/i) || [\"https:\"])[0].replace(/:$/,\"\");\n\n// Block common non-HTML assets\nconst STATIC_EXT_RE = /\\.(?:css|js|json|map|xml|txt|ico|svg|png|jpe?g|gif|webp|bmp|pdf|zip|gz|mp4|mov|avi|mpe?g|webm|wav|mp3|ogg|docx?|xlsx?|pptx?|woff2?|woff|ttf|eot)$/i;\nconst PATH_BLOCK_RE = /(?:\\/wp-admin|\\/login|\\/logout|\\/cart|\\/checkout|\\/account|\\/search)(?:\\/|$)/i;\n\n// 2) Minimal URL resolver (no global URL)\nfunction resolve(href) {\n  if (!href) return null;\n  href = href.trim();\n  if (/^(mailto:|tel:|javascript:|#)/i.test(href)) return null;\n  if (/^https?:\\/\\//i.test(href)) return href;\n  if (/^\\/\\//.test(href)) return protocol + href;\n  if (href.startsWith('/')) return origin + href;\n  return origin + '/' + href.replace(/^\\.\\//,'');\n}\n\n// 3) Collect links\nconst attrs = [];\nfor (const m of html.matchAll(/(?:href|action)\\s*=\\s*(?:\"([^\"]+)\"|'([^']+)')/gi)) attrs.push(m[1] ?? m[2]);\nconst inText = [];\nfor (const m of html.matchAll(/\\bhttps?:\\/\\/[a-z0-9.-]+(?:\\/[^\\s\"'<>)]*)?/gi)) inText.push(m[0]);\n\nconst urls = [...attrs, ...inText]\n  .map(resolve)\n  .filter(Boolean)\n  .map(u => u.replace(/#.*$/,'').replace(/\\?.*$/,'').replace(/(?<!:)\\/+$/,'/'))\n  .filter(u => u.startsWith(origin + '/'))\n  .filter(u => !STATIC_EXT_RE.test(u))\n  .filter(u => !PATH_BLOCK_RE.test(u));\n\nconst picked = Array.from(new Set([origin + '/', ...urls])).slice(0, 60);\nreturn picked.map(url => ({ json: { url, source: \"fallback\" } }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        960
+      ],
+      "id": "1d3109bd-a994-4351-be6f-4ee79039d5a1",
+      "name": "Extract Internal Links (fallback)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "22a6fe53-0430-47a4-b90d-949efc0bcead",
+              "leftValue": "={{ ['.xml', '.xml.gz'].some(ext => String($json.url ?? $json.sitemap_url ?? '').trim().split(/[?#]/)[0].toLowerCase().endsWith(ext)) }}",
+              "rightValue": "\\.xml(\\.gz)?(\\?.*)?$",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -256,
+        784
+      ],
+      "id": "fdef297f-6fd5-4bb4-a502-7ce2d05cc1a9",
+      "name": "Has child sitemaps?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Runs once per input item.\n// Read from $json, return a plain object (NOT an array).\n\nconst d = $json;\n\nconst get = (obj, path, fallback=null) => {\n  try { return path.split('.').reduce((o,k)=>o?.[k], obj) ?? fallback; } catch { return fallback; }\n};\n\nconst out = {\n  // header-ish fields (keep if you’ll merge real headers later)\n  source_url: d.url || \"\",\n  final_url: get(d, \"mobile.psi_final_url\") || get(d, \"desktop.psi_final_url\") || \"\",\n  http_status: get(d, \"http.status\", 0),\n  content_type: get(d, \"http.headers.content-type\", \"\"),\n  x_robots_tag: get(d, \"http.headers.x-robots-tag\", \"\"),\n  cache_control: get(d, \"http.headers.cache-control\", \"\"),\n  server: get(d, \"http.headers.server\", \"\"),\n  title: get(d, \"html_meta.title\", \"\"),\n  meta_description: get(d, \"html_meta.description\", \"\"),\n  robots_meta: get(d, \"html_meta.robots\", \"\"),\n  og_url: get(d, \"html_meta.og_url\", \"\"),\n  markdown: get(d, \"content.markdown\", \"\"),\n  html: get(d, \"content.html\", \"\"),\n  is_html: get(d, \"http.is_html\", false),\n  has_noindex:\n    /noindex/i.test(get(d, \"html_meta.robots\", \"\")) ||\n    /noindex/i.test(get(d, \"http.headers.x-robots-tag\",\"\")),\n  vary: get(d, \"http.headers.vary\", \"\"),\n  content_encoding: get(d, \"http.headers.content-encoding\", \"\"),\n  last_modified: get(d, \"http.headers.last-modified\", \"\"),\n  etag: get(d, \"http.headers.etag\", \"\"),\n  cache_status: get(d, \"http.cache_status\", \"\"),\n  content_length: get(d, \"http.headers.content-length\", \"\"),\n  age: get(d, \"http.headers.age\", \"\"),\n  date_header: get(d, \"http.headers.date\", \"\"),\n  link_header: get(d, \"http.headers.link\", \"\"),\n  hsts: get(d, \"http.headers.strict-transport-security\", \"\"),\n  csp: get(d, \"http.headers.content-security-policy\", \"\"),\n  x_content_type_options: get(d, \"http.headers.x-content-type-options\", \"\"),\n  x_frame_options: get(d, \"http.headers.x-frame-options\", \"\"),\n  referrer_policy: get(d, \"http.headers.referrer-policy\", \"\"),\n  permissions_policy: get(d, \"http.headers.permissions-policy\", \"\"),\n  is_redirect: !!get(d, \"http.is_redirect\", false),\n  is_cacheable: !!get(d, \"http.is_cacheable\", false),\n  is_compressed: /br|gzip|zstd/i.test(get(d, \"http.headers.content-encoding\",\"\")),\n  cache_ttl_s: Number(get(d, \"http.cache_ttl_s\", 0)),\n  canonical_from_header: get(d, \"http.headers.link_rel_canonical\", \"\"),\n\n  // PSI rollup\n  psi: {\n    mobile: {\n      strategy: get(d, \"mobile.strategy\"),\n      final_url: get(d, \"mobile.psi_final_url\"),\n      perf_score: get(d, \"mobile.lab_metrics.perf_score\"),\n      ttfb_ms: get(d, \"mobile.lab_metrics.ttfb_ms\"),\n      fcp_ms: get(d, \"mobile.lab_metrics.fcp_ms\"),\n      lcp_ms: get(d, \"mobile.lab_metrics.lcp_ms\"),\n      cls: get(d, \"mobile.lab_metrics.cls\"),\n      inp_ms: get(d, \"mobile.lab_metrics.inp_ms\"),\n      tti_ms: get(d, \"mobile.lab_metrics.tti_ms\"),\n      tbt_ms: get(d, \"mobile.lab_metrics.tbt_ms\"),\n      category_scores: get(d, \"mobile.category_scores\"),\n      field_cwv: get(d, \"mobile.field_cwv\"),\n      resources: get(d, \"mobile.resources\"),\n      diagnostics: get(d, \"mobile.diagnostics\"),\n      opportunities_top: get(d, \"mobile.opportunities_top\", []),\n      lcp_element: get(d, \"mobile.lcp_element\"),\n      eval_findings: get(d, \"mobile.eval_findings\", []),\n      recommendations: get(d, \"mobile.recommendations\", []),\n    },\n    desktop: {\n      strategy: get(d, \"desktop.strategy\"),\n      final_url: get(d, \"desktop.psi_final_url\"),\n      perf_score: get(d, \"desktop.lab_metrics.perf_score\"),\n      ttfb_ms: get(d, \"desktop.lab_metrics.ttfb_ms\"),\n      fcp_ms: get(d, \"desktop.lab_metrics.fcp_ms\"),\n      lcp_ms: get(d, \"desktop.lab_metrics.lcp_ms\"),\n      cls: get(d, \"desktop.lab_metrics.cls\"),\n      inp_ms: get(d, \"desktop.lab_metrics.inp_ms\"),\n      tti_ms: get(d, \"desktop.lab_metrics.tti_ms\"),\n      tbt_ms: get(d, \"desktop.lab_metrics.tbt_ms\"),\n      category_scores: get(d, \"desktop.category_scores\"),\n      field_cwv: get(d, \"desktop.field_cwv\"),\n      resources: get(d, \"desktop.resources\"),\n      diagnostics: get(d, \"desktop.diagnostics\"),\n      opportunities_top: get(d, \"desktop.opportunities_top\", []),\n      lcp_element: get(d, \"desktop.lcp_element\"),\n      eval_findings: get(d, \"desktop.eval_findings\", []),\n      recommendations: get(d, \"desktop.recommendations\", []),\n    },\n    overall: {\n      cwv_source: get(d, \"overall.cwv_source\"),\n      cwv_status: get(d, \"overall.cwv_status\"),\n      category_scores: get(d, \"overall.category_scores\"),\n      prioritized_recommendations: get(d, \"prioritized_recommendations\", []),\n    }\n  }\n};\n\nreturn out;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2944,
+        880
+      ],
+      "id": "b6fda5c7-0fed-46d4-a688-e9e1c3ed0f56",
+      "name": "map PSI"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-4-20250514",
+          "cachedResultName": "Claude 4 Sonnet"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        3072,
+        1088
+      ],
+      "id": "8ef4d9c4-041d-4fc6-b475-e7f0384e012a",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "Cu7UhQCsQna6iUHz",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Parse agent output (handles ```json ... ``` and double-encoded JSON)\nfunction parsePayload(raw) {\n  if (raw && typeof raw === \"object\") return raw;\n  let s = String(raw ?? \"\").trim();\n  if (!s) return {};\n  if (s.startsWith(\"```\")) s = s.replace(/^```[a-zA-Z]*\\s*/, \"\").replace(/```$/, \"\").trim();\n  try { return JSON.parse(s); } catch {}\n  try { return JSON.parse(JSON.parse(s)); } catch {}\n  return { raw };\n}\n\n// Remove null/undefined/empty objects/arrays recursively\nfunction prune(v) {\n  if (Array.isArray(v)) {\n    const a = v.map(prune).filter(x =>\n      x !== undefined && x !== null &&\n      !(typeof x === \"object\" && !Array.isArray(x) && Object.keys(x).length === 0)\n    );\n    return a.length ? a : undefined;\n  }\n  if (v && typeof v === \"object\") {\n    const o = {};\n    for (const [k,val] of Object.entries(v)) {\n      const p = prune(val);\n      if (p !== undefined) o[k] = p;\n    }\n    return Object.keys(o).length ? o : undefined;\n  }\n  return v ?? undefined;\n}\n\n// ---- main ----\nconst upstream = $json;\nconst upstreamUrl =\n  upstream.source_url ?? upstream.final_url ?? upstream.page_url ?? upstream.url ?? \"\";\n\nconst data = parsePayload(upstream.output ?? upstream);\n\n// core fields\nconst page_url = data.page_url || upstreamUrl || \"\";\nconst score    = (typeof data.score === \"number\") ? data.score : undefined;\n\nconst findings = Array.isArray(data.findings) ? data.findings : [];\nconst recs     = Array.isArray(data.recommendations) ? data.recommendations : [];\nconst refs     = Array.isArray(data.references) ? data.references : [];\n\n// group recs\nconst grouped = { P0: [], P1: [], P2: [] };\nfor (const r of recs) {\n  const p = String(r?.priority ?? \"P2\").toUpperCase();\n  if (!grouped[p]) grouped[p] = [];\n  grouped[p].push({\n    title: r?.title || r?.action || \"\",\n    action: r?.action || \"\",\n    rationale: r?.rationale || r?.why || \"\",\n    how: r?.how || \"\"\n  });\n}\n\n// assemble and prune\nconst normalized = prune({\n  category: \"Performance\",\n  page_url,\n  score,\n  findings,\n  recommendations: recs,\n  references: refs,\n  recs_grouped: grouped,\n  has_p0: grouped.P0.length > 0,\n  has_p1: grouped.P1.length > 0,\n\n  // if the agent (or upstream) provided structured blocks, keep them; else they’ll be dropped by prune()\n  core_web_vitals: data.core_web_vitals ?? upstream.core_web_vitals,\n  lab_metrics:     data.lab_metrics     ?? upstream.lab_metrics,\n  resources:       data.resources       ?? upstream.resources\n});\n\n// In a Function Item, return the single object (not { json: ... })\nreturn normalized;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3552,
+        880
+      ],
+      "id": "3c708003-8d01-45c1-b62b-f581e3b569ac",
+      "name": "Code"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-20250514",
+          "mode": "list",
+          "cachedResultName": "claude-sonnet-4-20250514"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Use the data below to write the section. Do NOT include any raw JSON.\n\nPage URL: {{ $json.page_url }}\nScore: {{ $json.score }}\n\nFindings:\n{{ $json.findings && $json.findings.length ? $json.findings.map(f => `- ${f}`).join('\\n') : '- None' }}\n\nGrouped Recommendations:\nP0:\n{{ $json.recs_grouped.P0 && $json.recs_grouped.P0.length ? $json.recs_grouped.P0.map(r => `- ${r.title} — ${r.rationale}`).join('\\n') : '- None' }}\n\nP1:\n{{ $json.recs_grouped.P1 && $json.recs_grouped.P1.length ? $json.recs_grouped.P1.map(r => `- ${r.title} — ${r.rationale}`).join('\\n') : '- None' }}\n\nP2:\n{{ $json.recs_grouped.P2 && $json.recs_grouped.P2.length ? $json.recs_grouped.P2.map(r => `- ${r.title} — ${r.rationale}`).join('\\n') : '- None' }}\n\nReferences:\n{{ $json.references && $json.references.length ? $json.references.join(', ') : '' }}\n\nConstraints & tips to apply:\n- Use plain English, keep it under ~300 words.\n- Emphasize Core Web Vitals thresholds (LCP ≤2500ms, INP ≤200ms, CLS ≤0.1).\n- Mention savings in ms/KB/MB where available.\n"
+            }
+          ]
+        },
+        "options": {
+          "system": "You are a Web Performance Report Writer Agent (2025). You receive normalized PERFORMANCE results for ONE page.  Write a concise, client-friendly section with: - A 2–3 sentence summary in plain English. - A prioritized fix list grouped by P0/P1/P2. - For each fix, include:   • Why it matters (1 line).   • How to fix (1–3 concrete steps). If relevant, show tiny code snippets (HTML/JS/CSS). - Call out metrics like LCP, TTFB, transfer size, image weight.  Rules: - No JSON. Output readable report prose with bullets and short code blocks where useful. - Focus on speed & Core Web Vitals (LCP, CLS, INP) and resource optimization. - Keep the whole section tight and actionable.  Format exactly: 1) Page: <URL> 2) Score & Verdict: <score>/100 — Performance 3) Summary:    <2–3 sentences> 4) Priority Fixes:    - P0 (Critical):      - <Fix name> — <1-line>        • Why it matters: <1 line>        • How to fix: <steps and tiny code if helpful>    - P1 (High):      - ...    - P2 (Medium/Low):      - ... 5) References consulted: <comma-separated>  // omit if none"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1,
+      "position": [
+        3808,
+        880
+      ],
+      "id": "35d33463-ed8b-42ae-9b5b-a747c086dc0f",
+      "name": "Performance/Speed Report Writer",
+      "credentials": {
+        "anthropicApi": {
+          "id": "Cu7UhQCsQna6iUHz",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "INSERT_EMAIL_CONNECTED_WITH_CREDENTIALS",
+        "toEmail": "INSERT_TO_EMAIL",
+        "subject": "={{\n(() => {\n  const url = $json.page_url || 'Page';\n  // prefer explicit score if set\n  let score = ($json.score === 0 || $json.score) ? $json.score : null;\n  // else, parse \"xx/100\" from the HTML block\n  if (score === null) {\n    const m = String($json.html || '').match(/(\\d{1,3})\\s*\\/\\s*100/);\n    if (m) score = parseInt(m[1], 10);\n  }\n  const scoreStr = (score === null ? '—' : String(score)) + '/100';\n  return `SEO Report — Performance — ${url} (${scoreStr})`;\n})()\n}}\n",
+        "html": "={{ $json.html }}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        4320,
+        880
+      ],
+      "id": "c8fd4702-31fe-4984-b338-3b4cd3bd23f4",
+      "name": "Send email",
+      "webhookId": "919a3bfa-ba76-4b5f-be1c-f1c7b733af92",
+      "credentials": {
+        "smtp": {
+          "id": "3KJnq7gQyvPNuZnu",
+          "name": "DTL Gmail"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Input: { content: [{ type: \"text\", text: \"...\" }] }\nconst md =\n  ($json.content && $json.content[0] && $json.content[0].text)\n    ? $json.content[0].text\n    : \"\";\n\n// Grab Page and Score from the writer text\nconst pageMatch  = md.match(/\\*\\*Page:\\*\\*\\s*(\\S+)/i) || md.match(/Page:\\s*(\\S+)/i);\nconst page_url   = pageMatch ? pageMatch[1] : \"\";\n\nconst scoreMatch = md.match(/Score\\s*&\\s*Verdict:\\s*(\\d{1,3})\\s*\\/\\s*100/i);\nconst score      = scoreMatch ? parseInt(scoreMatch[1], 10) : null;\n\n// minimal markdown -> HTML (good enough for emails)\nfunction mdToHtml(s) {\n  let h = s;\n  h = h.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>'); // **bold**\n  h = h.replace(/^\\s*-\\s/gm, '• ');                       // bullets\n  h = h.replace(/\\n/g, '<br/>');                          // line breaks\n  return `<div style=\"font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;line-height:1.45\">${h}</div>`;\n}\n\nreturn {\n  page_url,\n  score,\n  category: \"Performance\",\n  html: mdToHtml(md),\n  subject: `SEO Report — Performance — ${page_url || 'Page'} (${score ?? '—'}/100)`,\n\n  // keep these if your email template still references them; harmless if unused\n  findings: [],\n  recommendations: [],\n  references: []\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4128,
+        880
+      ],
+      "id": "361be49c-7ebe-4cd5-995c-9df80f14b927",
+      "name": "Code1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Init Site": {
+      "main": [
+        [
+          {
+            "node": "Fetch Sitemap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Init Site",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Sitemap": {
+      "main": [
+        [
+          {
+            "node": "Sitemap fetched?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Sitemap": {
+      "main": [
+        [
+          {
+            "node": "Has child sitemaps?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand URLs (If Grouped)": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Site Speed/Performance Review Agent": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [],
+        [
+          {
+            "node": "PSI Mobile",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "PSI Desktop",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "CrUX Mobile",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "CrUX Desktop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PSI Mobile": {
+      "main": [
+        [
+          {
+            "node": "Wrap Mobile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait2": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "map PSI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wrap Mobile": {
+      "main": [
+        [
+          {
+            "node": "Merge PSI (by position)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PSI Desktop": {
+      "main": [
+        [
+          {
+            "node": "Wrap Desktop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wrap Desktop": {
+      "main": [
+        [
+          {
+            "node": "Merge PSI (by position)",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge PSI (by position)": {
+      "main": [
+        [
+          {
+            "node": "Extract Perf + CWV (mobile+desktop)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Perf + CWV (mobile+desktop)": {
+      "main": [
+        [
+          {
+            "node": "Wait2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CrUX Mobile": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CrUX Desktop": {
+      "main": [
+        [
+          {
+            "node": "If1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CrUX Mobile Set": {
+      "main": [
+        [
+          {
+            "node": "Merge PSI (by position)",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "CrUX Desktop Set": {
+      "main": [
+        [
+          {
+            "node": "Merge PSI (by position)",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "CrUX Mobile Set",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CrUX Mobile Origin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If1": {
+      "main": [
+        [
+          {
+            "node": "CrUX Desktop Set",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CrUX Desktop Origin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CrUX Desktop Origin": {
+      "main": [
+        [
+          {
+            "node": "CrUX Desktop Set",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CrUX Mobile Origin": {
+      "main": [
+        [
+          {
+            "node": "CrUX Mobile Set",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Child Sitemap": {
+      "main": [
+        [
+          {
+            "node": "Parse Child Sitemap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sitemap fetched?": {
+      "main": [
+        [
+          {
+            "node": "Parse Sitemap",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Home - fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Home - fallback": {
+      "main": [
+        [
+          {
+            "node": "Extract Internal Links (fallback)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Internal Links (fallback)": {
+      "main": [
+        [
+          {
+            "node": "Expand URLs (If Grouped)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has child sitemaps?": {
+      "main": [
+        [
+          {
+            "node": "Fetch Child Sitemap",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Expand URLs (If Grouped)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Child Sitemap": {
+      "main": [
+        [
+          {
+            "node": "Expand URLs (If Grouped)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "map PSI": {
+      "main": [
+        [
+          {
+            "node": "Site Speed/Performance Review Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Site Speed/Performance Review Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "Performance/Speed Report Writer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Performance/Speed Report Writer": {
+      "main": [
+        [
+          {
+            "node": "Code1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code1": {
+      "main": [
+        [
+          {
+            "node": "Send email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "17454cf8-6500-4917-a2e9-f4d613833426",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4dd9ef9c32b4c5c978d1872da1532fc15b09739127c117a29f6b4689b963430b"
+  },
+  "id": "Yhcly00PZmo7YMoy",
+  "tags": []
+}
