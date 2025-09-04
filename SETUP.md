@@ -93,7 +93,7 @@ Before starting, ensure you have:
 3. Choose "SMTP"
 4. Configure based on your email provider:
    - **Host**: Your SMTP server
-   - **Port**: SMTP port (usually 587)
+   - **Port**: SMTP port (usually 587 or 465 for Gmail workspace)
    - **Security**: STARTTLS
    - **Username**: Your email address
    - **Password**: Your email password/app password
