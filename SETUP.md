@@ -194,10 +194,11 @@ Before starting, ensure you have:
 
 If you encounter issues:
 
-1. Check this guide and README.md
-2. Review n8n documentation
-3. Create an issue in this repository
-4. Include error messages and node configurations
+1. email dave@deepthinklabs.ai - Happy to help!
+2. Check this guide and README.md
+3. Review n8n documentation
+4. Create an issue in this repository
+5. Include error messages and node configurations
 
 ---
 
