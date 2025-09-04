@@ -171,6 +171,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙋‍♂️ Support
 
 For questions and support:
+- email dave@deepthinklabs.ai - Happy to help!
 - Create an issue in this repository
 - Check the [n8n documentation](https://docs.n8n.io/)
 - Review the [PageSpeed Insights API documentation](https://developers.google.com/speed/docs/insights/v5/get-started)
